@@ -79,6 +79,7 @@ RUN pip3 install \
   -r backend/requirements.txt \
   -r backend/requirements-test.txt \
   -r backend/requirements-lint.txt
+RUN pip3 install aiohttp
 
 
 # CI settings

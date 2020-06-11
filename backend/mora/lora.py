@@ -2,6 +2,18 @@
 # SPDX-License-Identifier: MPL-2.0
 
 from __future__ import generator_stop
+import aiohttp
+import asyncio
+from functools import wraps
+def async_to_sync(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        future = asyncio.ensure_future(f(*args, **kwargs))
+        return loop.run_until_complete(future)
+
+    return wrapper
+
 
 import itertools
 import uuid
@@ -42,6 +54,28 @@ def _check_response(r):
             exceptions.ErrorCodes.E_UNKNOWN(message=msg, cause=cause)
 
     return r
+
+async def _acheck_response(r):
+    if r.status != 200:
+        try:
+            cause = await r.json()
+            msg = cause['message']
+        except (ValueError, KeyError):
+            cause = None
+            msg = await r.text
+
+        if r.status == 400:
+            exceptions.ErrorCodes.E_INVALID_INPUT(message=msg, cause=cause)
+        elif r.status == 401:
+            exceptions.ErrorCodes.E_UNAUTHORIZED(message=msg, cause=cause)
+        elif r.status == 403:
+            exceptions.ErrorCodes.E_FORBIDDEN(message=msg, cause=cause)
+        else:
+            exceptions.ErrorCodes.E_UNKNOWN(message=msg, cause=cause)
+
+    return r
+
+
 
 
 class Connector:
@@ -151,9 +185,37 @@ class Scope:
         except IndexError:
             return []
 
+    async def afetch(self, session, **params):
+        params = dict(**self.connector.defaults, **params)
+        tup_list = []
+    
+        def handle_pair(key, value):
+            if type(value) is bool:
+                tup_list.append((key, str(value)))
+            elif type(value) is list:
+                for val in value:
+                    handle_pair(key, val)
+            elif type(value) is str:
+                tup_list.append((key, value))
+            else:
+                print("WOW")
+
+        for key, value in params.items():
+            handle_pair(key, value)
+
+        async with session.get(self.base_path, params=tup_list) as response:
+
+            await _acheck_response(response)
+
+            try:
+                return (await response.json())['results'][0]
+            except IndexError:
+                return []
+
     __call__ = fetch
 
-    def get_all(self, *, start=0, limit=settings.DEFAULT_PAGE_SIZE, **params):
+    @async_to_sync
+    async def get_all(self, *, start=0, limit=settings.DEFAULT_PAGE_SIZE, **params):
         if limit > 0:
             params['maximalantalresultater'] = limit
         params['foersteresultat'] = start
@@ -178,10 +240,15 @@ class Scope:
 
         per_length = 36 + len('&uuid=')
 
-        for chunk in util.splitlist(uuids, int(available_length / per_length)):
-            for d in self.fetch(uuid=chunk):
-                yield d['id'], (d['registreringer'] if wantregs
-                                else d['registreringer'][0])
+        returns = []
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for chunk in util.splitlist(uuids, int(available_length / per_length)):
+                tasks.append(self.afetch(session, uuid=chunk))
+            for d in list(*await asyncio.gather(*tasks)):
+                returns.append((d['id'], (d['registreringer'] if wantregs
+                                    else d['registreringer'][0])))
+        return returns
 
     def paged_get(self, func, *,
                   start=0, limit=settings.DEFAULT_PAGE_SIZE,
